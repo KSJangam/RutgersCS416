@@ -1,0 +1,447 @@
+#include "my_vm.h"
+pthread_mutex_t lock;
+char * pmap;
+char * l1map;
+char ** l2map;
+int init=0;
+int *l2size;
+int psize,l1size,l1max, l2max,tlbsize,tlbindex;
+double tlbchecks,tlbmiss;
+unsigned int **l1;
+struct tlb translator[TLB_ENTRIES];
+void * pmem;
+/*
+Function responsible for allocating and setting your physical memory 
+*/
+static unsigned int get_top_bits(unsigned int value, int num_bits){
+  int num_bits_to_prune=32-num_bits;
+  return(value >> num_bits_to_prune);
+}
+static unsigned int get_mid_bits(unsigned int value, int num_middle_bits, int num_lower_bits){
+  if(num_middle_bits==0&&num_lower_bits==0)
+    return 0;
+  unsigned int mid_bits_value=0;
+  value=value >> num_lower_bits;
+  unsigned int outer_bits_mask=(1<<num_middle_bits);
+  outer_bits_mask=outer_bits_mask-1;
+  mid_bits_value=value&outer_bits_mask;
+  return mid_bits_value;
+}
+static void set_bit_at_index(char* bitmap,unsigned int index, int one){
+  char* region =((char *)bitmap)+(index/8);
+  char bit=1<<(index%8);
+  if(one){
+    *region |= bit;
+  }
+  else{
+    *region &= ~bit;
+  }
+  return;
+}
+static int get_bit_at_index(char *bitmap, unsigned int index){
+  char * region=((char*) bitmap)+(index/8);
+  char bit=1<<(index%8);
+  return (int)(*region >> (index % 8)) & 0x1;
+}
+void set_physical_mem() {
+  psize=0;
+  int i =0;
+  l1size=0;
+  l1max=(int)pow(2,(32-(int)log2(PGSIZE))/2);
+  l1=(unsigned int**)malloc(l1max*sizeof(unsigned int *));
+  pmem=malloc(MEMSIZE);
+  pmap=(char *)malloc(MEMSIZE/PGSIZE/8);
+  memset(pmap,0,MEMSIZE/PGSIZE/8);
+  l1map=(char *)malloc(l1max/8);
+  memset(l1map, 0, l1max/8);
+  l2map=(char **)malloc(l1max*sizeof(char*));
+  l2size=(int *)malloc(l1max*sizeof(int));
+  for(i=0; i<l1max; i++){
+    l2size[i]=0;
+  }
+  tlbsize=0;
+  tlbindex=0;
+  for(i=0; i<TLB_ENTRIES; i++){
+    translator[i].valid=0;
+  }
+  pthread_mutex_init(&lock,NULL);
+
+}
+
+
+/*
+ * Part 2: Add a virtual to physical page translation to the TLB.
+ */
+int
+add_TLB(void *va, void *pa)
+{
+  
+  unsigned int top_bits=get_top_bits((unsigned int)va,32-(int)log2(PGSIZE));
+
+  int i=0;
+  for(i=0; i<TLB_ENTRIES; i++){
+    if(translator[i].valid==0){
+      translator[i].valid=1;
+      translator[i].va=top_bits;
+      translator[i].pa=(unsigned int)pa;
+      tlbsize=tlbsize+1;
+      return 1;
+    }
+  }
+  
+  tlbindex=tlbindex%TLB_ENTRIES;
+  translator[tlbindex].valid=1;
+  translator[tlbindex].va=top_bits;
+  translator[tlbindex].pa=(unsigned int)pa;
+  tlbindex=tlbindex+1;
+  return 1;
+    
+}
+
+
+/*
+ * Part 2: Check TLB for a valid translation.
+ * Returns the physical page address.
+ */
+pte_t *
+check_TLB(void *va) {
+  int i;
+  unsigned int top_bits=get_top_bits((unsigned int)va,32-(int)log2(PGSIZE));
+
+  tlbchecks=tlbchecks+1;
+  for(i=0; i<TLB_ENTRIES; i++){
+    if(translator[i].valid&&translator[i].va==top_bits){
+      return &(translator[i].pa);
+    }
+  }
+  tlbmiss=tlbmiss+1;
+  return NULL;
+}
+
+
+/*
+ * Part 2: Print TLB miss rate.
+ */
+void
+print_TLB_missrate()
+{
+  pthread_mutex_lock(&lock);
+  double miss_rate = tlbmiss/tlbchecks;	
+  fprintf(stderr, "TLB miss rate %lf \n", miss_rate);
+  pthread_mutex_unlock(&lock);
+}
+
+
+
+/*
+The function takes a virtual address and page directories starting address and
+performs translation to return the physical address
+*/
+pte_t *translate(void *va) {
+  pte_t* ppage=check_TLB(va);
+  if(ppage!=NULL)return ppage;
+  unsigned int top_bits=get_top_bits((unsigned int)va,(int)log2(l1max));
+  unsigned int mid_bits=get_mid_bits((unsigned int)va,32-(int)log2(l1max)-(int)log2(PGSIZE),(int)log2(PGSIZE));
+  if(l1size>0&&get_bit_at_index(l1map, top_bits)){
+    if(l2size[top_bits]>0&&get_bit_at_index(l2map[top_bits],mid_bits)){
+      add_TLB(va,(void*)l1[top_bits][mid_bits]);
+      return (pte_t*)(&l1[top_bits][mid_bits]);
+    }
+  }
+
+    //If translation not successfull
+    return NULL; 
+}
+
+
+/*
+The function takes a page directory address, virtual address, physical address
+as an argument, and sets a page table entry. This function will walk the page
+directory to see if there is an existing mapping for a virtual address. If the
+virtual address is not present, then a new entry will be added
+*/
+int
+page_map(void *va, void *pa)
+{
+  unsigned int top_bits=get_top_bits((unsigned int)va,(int)log2(l1max));
+  unsigned int mid_bits=get_mid_bits((unsigned int)va,32-(int)log2(l1max)-(int)log2(PGSIZE),(int)log2(PGSIZE));
+ if(l1size>0&&get_bit_at_index(l1map, top_bits)){
+   if(l2size[top_bits]>0&&get_bit_at_index(l2map[top_bits],mid_bits)){
+     return -1;
+   }
+   else{
+     l2size[top_bits]=l2size[top_bits]+1;
+     set_bit_at_index(l2map[top_bits],mid_bits,1);
+     l1[top_bits][mid_bits]=(unsigned int)pa;
+   }
+ }
+ else{
+   l2size[top_bits]=l2size[top_bits]+1;
+   l1size=l1size+1;
+   set_bit_at_index(l1map, top_bits,1);
+   l1[top_bits]=(unsigned int*)malloc(sizeof(unsigned int)*(int)pow(2,(32-(int)log2(l1max)-(int)log2(PGSIZE))));
+   l2map[top_bits]=(char *)malloc((int)pow(2,(32-(int)log2(l1max)-(int)log2(PGSIZE)))/8);
+   memset(l2map[top_bits],0,(int)pow(2,(32-(int)log2(l1max)-(int)log2(PGSIZE)))/8);
+   set_bit_at_index(l2map[top_bits],mid_bits,1);
+   l1[top_bits][mid_bits]=(unsigned int)pa;
+ }
+
+    return 1;
+}
+
+
+/*Function that gets the next available page
+*/
+void *get_next_avail(int num_pages) {
+  if(num_pages>(MEMSIZE/PGSIZE)-psize)return NULL;
+  int i=0;
+  for(i=0; i<MEMSIZE/PGSIZE; i++){
+    if(get_bit_at_index(pmap,i)==0){
+      set_bit_at_index(pmap,i,1);
+      return (void*)(&((char*)pmem)[i*PGSIZE]);
+    }
+  }
+  return NULL;
+    //Use virtual address bitmap to find the next free page
+}
+
+unsigned int get_vpages(int num_pages){
+  l2max=(int)pow(2,(32-(int)log2(l1max)-(int)log2(PGSIZE)));
+  int i=0;
+  int ok=1;
+  int j=0;
+  int k=0;
+  int l=0;
+  int num_l2=num_pages/l2max;
+  if(num_pages%l2max>0)
+    num_l2=num_l2+1;
+  unsigned int ret=-1;
+  for(i=0; i+num_l2<=l1max; i++){
+    if(get_bit_at_index(l1map,i)==0){
+      for(k=1;k<num_l2; k++){
+	if(get_bit_at_index(l1map,i+k)==1){
+	  ok=0;
+	} 
+      }
+      if(ok){
+	return (unsigned int)(i<<((int)log2(PGSIZE)+(int)log2(l2max)));
+      }
+      ok=1;
+    }
+    else if(l2size[i]<l2max){
+      for(k=0;k<l2max;k++){
+	if(get_bit_at_index(l2map[i],k)==0){
+	  for(l=k+1;l<l2max;l++){
+	    if(get_bit_at_index(l2map[i],l)==1){
+	      ok=0;
+	    }
+	  }
+	  if(ok){
+	     ret=(unsigned int)(i<<((int)log2(PGSIZE)+(int)log2(l2max)))+(unsigned int)(k<<((int)log2(PGSIZE)));
+	     num_l2=(num_pages-(l2max-k))/l2max;
+	     if((num_pages-(l2max-k))%l2max>0)
+	       num_l2=num_l2+1;
+	     for(j=1;j<=num_l2; j++){
+	       if(get_bit_at_index(l1map,i+j)==1){
+		 ok=0;
+	       } 
+	     }
+	     if(ok){
+	       return ret;
+	     }
+	     ok=1;
+	     k=l2max;//break out of loop
+	  }
+	  ok=1;
+	  k=l2max;
+	}
+      }
+    }
+  }
+
+  return -1;
+}
+/* Function responsible for allocating pages
+and used by the benchmark
+*/
+void *a_malloc(unsigned int num_bytes) {
+  if(num_bytes==0)return NULL;
+  if(init==0){
+    init=1;
+    set_physical_mem();
+  }
+  pthread_mutex_lock(&lock);
+  int num_pages=num_bytes/PGSIZE;
+
+  if(num_bytes%PGSIZE>0)
+    num_pages=num_pages+1;//account for int division
+   
+  void* pa;
+  unsigned int  va=get_vpages(num_pages);
+  void * ret =(void*) va;
+  if(va==-1){
+    pthread_mutex_unlock(&lock);
+    return NULL;
+  }
+  while(num_pages>0){
+    pa=get_next_avail(num_pages);
+    if(pa==NULL){
+      pthread_mutex_unlock(&lock);
+      return NULL;
+    }
+    psize=psize+1;
+    page_map((void*)va, pa);
+    add_TLB((void*)va,pa);
+    va=va+(1<<((int)log2(PGSIZE)));
+    num_pages=num_pages-1;
+  }
+  pthread_mutex_unlock(&lock);
+  return ret;
+}
+
+/* Responsible for releasing one or more memory pages using virtual address (va)
+*/
+void a_free(void *va, int size) {
+  pthread_mutex_lock(&lock);
+  int i=0;
+  int j=0;
+  unsigned int v=(unsigned int)va;
+  pte_t * ppage;
+  int num_pages=size/PGSIZE;
+  if(size%PGSIZE>1)
+    num_pages=num_pages+1;
+  unsigned int top_bits;
+  unsigned int mid_bits;
+  for(i=0; i<num_pages; i++){
+    top_bits=get_top_bits(v,(int)log2(l1max));
+    mid_bits=get_mid_bits(v,32-(int)log2(l1max)-(int)log2(PGSIZE),(int)log2(PGSIZE));
+    ppage=translate((void*)v);
+    if(ppage!=NULL){
+      set_bit_at_index(pmap, ((*ppage-(unsigned int)pmem)/PGSIZE),0);
+      psize=psize-1;
+      set_bit_at_index(l2map[top_bits],mid_bits,0);
+      l2size[top_bits]=l2size[top_bits]-1;
+      for(j=0;j<TLB_ENTRIES;j++){
+	if(translator[i].valid&&translator[i].va==v){
+	  translator[i].valid=0;
+	  tlbsize=tlbsize-1;
+	}
+      }
+    }
+    v=v+(1<<((int)log2(PGSIZE)));
+  }
+  pthread_mutex_unlock(&lock);
+    
+}
+
+
+/* The function copies data pointed by "val" to physical
+ * memory pages using virtual address (va)
+*/
+void put_value(void *va, void *val, int size) {
+  pthread_mutex_lock(&lock);
+  unsigned int offset=get_mid_bits((unsigned int)va, (int)log2(PGSIZE),0);
+  int i=0;
+  int k=0;
+  unsigned int v=(unsigned int)va;
+  int x=size;
+  
+  
+  pte_t* ppage=translate(va);
+  
+  for(k=offset; k<PGSIZE; k++){
+    if(x>0){
+      ((char*)pmem)[*ppage-(unsigned int)pmem+k]=((char *)val)[size-x];
+      x=x-1;
+    }
+  }
+  int num_pages=x/PGSIZE;
+  if(x%PGSIZE>1)
+    num_pages=num_pages+1;
+  for(k=1; k<num_pages;k++){
+    v=v+1<<(unsigned int)log2(PGSIZE);
+    ppage=translate((void*)v);
+    for(i=0;i<PGSIZE; i++){
+      if(x>0){
+	 ((char*)pmem)[*ppage-(unsigned int)pmem+i]=((char *)val)[size-x];
+	x=x-1;
+      } 
+    }
+  }
+  pthread_mutex_unlock(&lock);
+
+}
+
+
+/*Given a virtual address, this function copies the contents of the page to val*/
+void get_value(void *va, void *val, int size) {
+  pthread_mutex_lock(&lock);
+
+  unsigned int offset=get_mid_bits((unsigned int)va, (int)log2(PGSIZE),0);
+  int i=0;
+  int k=0;
+  unsigned int v=(unsigned int)va;
+  int x=size;
+  
+  pte_t* ppage=translate(va);
+    
+  for(k=offset; k<PGSIZE; k++){
+    if(x>0){
+	((char *)val)[size-x]=((char*)pmem)[*ppage-(unsigned int)pmem+k];
+      x=x-1;
+    }
+  }
+  int num_pages=x/PGSIZE;
+  if(x%PGSIZE>1)
+    num_pages=num_pages+1;
+  for(k=1; k<num_pages;k++){
+    v=v+1<<(unsigned int)log2(PGSIZE);
+    ppage=translate((void*)v);
+    for(i=0;i<PGSIZE; i++){
+      if(x>0){
+	((char *)val)[size-x]=((char*)pmem)[*ppage-(unsigned int)pmem+i];
+	x=x-1;
+      } 
+    }
+  }
+  pthread_mutex_unlock(&lock);
+
+
+}
+
+
+
+/*
+This function receives two matrices mat1 and mat2 as an argument with size
+argument representing the number of rows and columns. After performing matrix
+multiplication, copy the result to answer.
+*/
+void mat_mult(void *mat1, void *mat2, int size, void *answer) {
+  pthread_mutex_lock(&lock);
+  int i,j,k;
+  int a1=0;
+  int a2=0;
+  int a3=0;
+  int val1;
+  int val2;
+  int val3;
+  for(i=0; i<size; i++){
+    for(j=0; j<size; j++){
+      for(k=0; k<size; k++){
+	a1=(unsigned int)mat1+((i*size*sizeof(int)))+(k*sizeof(int));
+	a2=(unsigned int)mat2+((k*size*sizeof(int)))+(j*sizeof(int));
+	a3=(unsigned int)answer+((i*size*sizeof(int)))+(j*sizeof(int));
+	get_value((void *)a1,&val1,sizeof(int));
+	get_value((void *)a2, &val2, sizeof(int));
+	get_value((void *)a3, &val3, sizeof(int));
+	val3 = val3 + (val1 * val2);
+	put_value((void*)a3, &val3, sizeof(int));
+      }
+    }
+  }
+
+  pthread_mutex_unlock(&lock);
+}
+
+
+
