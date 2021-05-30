@@ -1,6 +1,22 @@
 Three C programming Assignments from the CS 416: Operating System Design course at Rutgers University.
 
-Assignment 2:
+Assignment 2: User-level Thread Library and Scheduler
+This project implemented a pure user-level thread library similar to the pThread library. This project also implemented two preemptive schedulers for the threads.
+Thread functionality included:
+1. Thread Creation
+2. Thread Yield
+3. Thread Exit
+4. Thread Join
+5. Thread Mutex Initialization
+6. Thread Mutex Lock and Unlock
+7. Thread Mutex Destroy 
+Thread control blocks and thread contexts were used when creating threads to be able to switch back to those threads.
+The two different schedulers implemented were:
+1. Pre-emptive Shortest Job First scheduler
+2. Multi-level Feedback Queue
+These schedulers used timers to periodically switch between threads every few hundred milliseconds.
+When compiling, the default scheduler is PSJF. To change the scheduler, compile with:
+make SCHED=MLFQ
 
 Assignment 3: User level Memory Management
 This project implemented a user level page table that can translate virtual addresses to physical adressess through building a multi level page table. In additiom the project also implemented a translation lookaside buffer to reduce translation cost.
